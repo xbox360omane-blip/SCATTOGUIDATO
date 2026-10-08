@@ -71,34 +71,55 @@ enum ImageTools {
         return UIImage(cgImage: cut)
     }
 
-    /// Sviluppo con Core Image secondo i valori dell'AI.
-    static func develop(_ image: UIImage, with d: SceneAnalysis.Develop) -> UIImage {
-        guard let cg = image.normalizedUp().cgImage else { return image }
+    /// Intensità predefinita delle correzioni (0 = nessuna, 1 = piena).
+    static let defaultStrength = 0.5
+
+    /// Sviluppo leggero e naturale con Core Image.
+    /// I valori dell'AI vengono ridotti e limitati: anche al 100% le correzioni restano contenute.
+    static func develop(_ image: UIImage, with d: SceneAnalysis.Develop, strength: Double = defaultStrength) -> UIImage {
+        let s = clamp(strength, 0, 1)
+        guard s > 0.001, let cg = image.normalizedUp().cgImage else { return image }
         var ci = CIImage(cgImage: cg)
         let extent = ci.extent
 
-        if d.exposure != 0, let f = CIFilter(name: "CIExposureAdjust") {
+        // esposizione: al massimo ±0,6 stop
+        let ev = clamp(d.exposure, -1, 1) * 0.6 * s
+        if abs(ev) > 0.01, let f = CIFilter(name: "CIExposureAdjust") {
             f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(clamp(d.exposure, -1.5, 1.5), forKey: kCIInputEVKey)
+            f.setValue(ev, forKey: kCIInputEVKey)
             ci = f.outputImage ?? ci
         }
-        if d.shadows != 0 || d.highlights < 0, let f = CIFilter(name: "CIHighlightShadowAdjust") {
+        // ombre (solo schiarite) e recupero alte luci, moderati
+        let sh = clamp(d.shadows, 0, 1) * 0.45 * s
+        let hi = 1 - clamp(-d.highlights, 0, 1) * 0.35 * s
+        if sh > 0.01 || hi < 0.99, let f = CIFilter(name: "CIHighlightShadowAdjust") {
             f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(clamp(d.shadows, -1, 1) * 0.8, forKey: "inputShadowAmount")
-            f.setValue(clamp(1 + min(0, d.highlights) * 0.7, 0.3, 1), forKey: "inputHighlightAmount")
+            f.setValue(sh, forKey: "inputShadowAmount")
+            f.setValue(hi, forKey: "inputHighlightAmount")
             ci = f.outputImage ?? ci
         }
-        if d.warmth != 0, let f = CIFilter(name: "CITemperatureAndTint") {
+        // temperatura: al massimo ±600 K
+        let dk = clamp(d.warmth, -1, 1) * 600 * s
+        if abs(dk) > 20, let f = CIFilter(name: "CITemperatureAndTint") {
             f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(CIVector(x: 6500 + CGFloat(clamp(d.warmth, -1, 1)) * 1500, y: 0), forKey: "inputNeutral")
+            f.setValue(CIVector(x: 6500 + CGFloat(dk), y: 0), forKey: "inputNeutral")
             f.setValue(CIVector(x: 6500, y: 0), forKey: "inputTargetNeutral")
             ci = f.outputImage ?? ci
         }
-        if d.contrast != 0 || d.saturation != 0, let f = CIFilter(name: "CIColorControls") {
+        // contrasto leggero
+        let con = 1 + clamp(d.contrast, -0.5, 0.5) * 0.25 * s
+        if abs(con - 1) > 0.005, let f = CIFilter(name: "CIColorControls") {
             f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(1 + clamp(d.contrast, -0.6, 0.6) * 0.5, forKey: kCIInputContrastKey)
-            f.setValue(1 + clamp(d.saturation, -0.6, 0.6), forKey: kCIInputSaturationKey)
+            f.setValue(con, forKey: kCIInputContrastKey)
+            f.setValue(1, forKey: kCIInputSaturationKey)
             f.setValue(0, forKey: kCIInputBrightnessKey)
+            ci = f.outputImage ?? ci
+        }
+        // colore: vibranza (protegge pelle e colori già saturi) invece della saturazione
+        let vib = clamp(d.saturation, -0.5, 0.5) * 0.5 * s
+        if abs(vib) > 0.01, let f = CIFilter(name: "CIVibrance") {
+            f.setValue(ci, forKey: kCIInputImageKey)
+            f.setValue(vib, forKey: "inputAmount")
             ci = f.outputImage ?? ci
         }
         guard let out = context.createCGImage(ci.cropped(to: extent), from: extent) else { return image }

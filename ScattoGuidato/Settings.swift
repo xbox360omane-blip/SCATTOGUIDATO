@@ -32,6 +32,7 @@ enum Keychain {
 struct SettingsView: View {
     @Binding var apiKey: String
     @Binding var model: String
+    @Binding var useAI: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var draftKey = ""
 
@@ -44,6 +45,14 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Toggle("Usa l'AI di Claude", isOn: $useAI)
+                } footer: {
+                    Text(useAI
+                         ? "L'analisi viene fatta da Claude: capisce il contesto della scena. Serve una chiave API."
+                         : "Modalità locale: volti, soggetto, orizzonte e luce vengono analizzati sul telefono. Gratis e senza connessione.")
+                }
+                if useAI {
                 Section {
                     SecureField("sk-ant-…", text: $draftKey)
                         .textInputAutocapitalization(.never)
@@ -59,6 +68,7 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()
+                }
                 }
             }
             .navigationTitle("Impostazioni")

@@ -131,7 +131,7 @@ enum Prompts {
     - "rotate": gradi per ruotare l'immagine in senso orario e raddrizzare orizzonte o verticali (positivo = orario, 0 se è già dritta).
     - "moves": al massimo 4 istruzioni fisiche per il fotografo (spostarsi, abbassarsi, girare attorno al soggetto per cambiare la luce), la più importante per prima. ⤢ = avvicinati, ⤡ = allontanati, ⌄ = abbassati, ⌃ = alzati.
     - "exposure": valori consigliati per lo scatto; "focus_point" è dove mettere fuoco ed esposizione, in coordinate normalizzate di QUESTA immagine.
-    - "develop": correzioni di post-produzione da applicare alla foto finale (0 = nessuna modifica).
+    - "develop": correzioni di post-produzione LEGGERE e NATURALI, come farebbe un fotografo esperto (0 = nessuna modifica). Usa valori piccoli e lascia 0 dove non serve. Rispetta l'atmosfera della luce reale: non aumentare mai calore o saturazione se la scena è già calda, arancione o colorata; se c'è una dominante forte (es. luce artificiale molto arancione) correggila verso il neutro con "warmth" negativo moderato. Evita contrasto e saturazione alti.
 
     Rispondi solo con un oggetto JSON con questa forma:
     """ + schema
