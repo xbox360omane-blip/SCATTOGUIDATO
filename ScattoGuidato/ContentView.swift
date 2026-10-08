@@ -681,6 +681,11 @@ struct SocialSection: View {
                     .font(.footnote)
                     .foregroundStyle(amber)
             }
+            if !social.caption.isEmpty {
+                Text("“" + social.caption + "”")
+                    .font(.footnote.italic())
+                    .textSelection(.enabled)
+            }
             if !social.format.isEmpty {
                 Text("Formato consigliato: " + social.format).font(.caption).foregroundStyle(.secondary)
             }
@@ -714,6 +719,8 @@ struct ReviewView: View {
     @State private var social: SceneAnalysis.Social?
     @State private var tips: [String] = []
     @State private var evaluating = false
+    @State private var assetId: String?
+    @State private var showShare = false
 
     var body: some View {
         ZStack {
@@ -789,6 +796,22 @@ struct ReviewView: View {
                         .foregroundStyle(.black)
                         .disabled(saved || working)
                     }
+                    HStack(spacing: 12) {
+                        Button(action: openInstagram) {
+                            Label("Instagram", systemImage: "camera.circle")
+                                .frame(maxWidth: .infinity).padding(.vertical, 6)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .disabled(working)
+                        Button { copyPostText(); showShare = true } label: {
+                            Label("Condividi", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity).padding(.vertical, 6)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .disabled(working)
+                    }
                 }
                 .padding(14)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -796,6 +819,10 @@ struct ReviewView: View {
             }
         }
         .foregroundStyle(.white)
+        .sheet(isPresented: $showShare) {
+            ActivityView(items: postText.isEmpty ? [currentImage] : [currentImage, postText])
+                .presentationDetents([.medium, .large])
+        }
         .onAppear {
             develop = review.develop
             social = review.social
@@ -831,6 +858,7 @@ struct ReviewView: View {
         guard let d = develop else { shown = review.original; return }
         working = true
         saved = false
+        assetId = nil
         let s = strength
         let src = review.original
         Task.detached(priority: .userInitiated) {
@@ -842,19 +870,54 @@ struct ReviewView: View {
         }
     }
 
+    private var currentImage: UIImage { shown ?? review.original }
+
+    /// Didascalia + hashtag proposti dall'AI.
+    private var postText: String {
+        var parts: [String] = []
+        if let c = social?.caption, !c.isEmpty { parts.append(c) }
+        if let h = social?.hashtags, !h.isEmpty {
+            parts.append(h.map { $0.hasPrefix("#") ? $0 : "#" + $0 }.joined(separator: " "))
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func copyPostText() {
+        if !postText.isEmpty { UIPasteboard.general.string = postText }
+    }
+
     private func save() {
-        let image = shown ?? review.original
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized || status == .limited else {
-                DispatchQueue.main.async { saveMessage = "Consenti l'aggiunta di foto in Impostazioni > Scatto Guidato." }
-                return
+        saveIfNeeded { _ in }
+    }
+
+    /// Salva una sola volta (con le correzioni attuali) e restituisce l'identificativo della foto.
+    private func saveIfNeeded(_ done: @escaping (String?) -> Void) {
+        if saved, let id = assetId { done(id); return }
+        PhotoLibrary.save(currentImage) { result in
+            switch result {
+            case .success(let id):
+                assetId = id
+                saved = true
+                saveMessage = "Salvata nel rullino."
+                done(id)
+            case .failure(let error):
+                saveMessage = error.localizedDescription
+                done(nil)
             }
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.creationRequestForAsset(from: image)
-            }) { ok, _ in
+        }
+    }
+
+    private func openInstagram() {
+        saveIfNeeded { id in
+            guard let id else { return }
+            copyPostText()
+            Instagram.openNewPost(assetId: id) { ok in
                 DispatchQueue.main.async {
-                    saved = ok
-                    saveMessage = ok ? "Salvata nel rullino." : "Salvataggio non riuscito. Riprova."
+                    if !ok {
+                        saveMessage = "Instagram non risulta installato. La foto è nel rullino."
+                    } else if !postText.isEmpty {
+                        saveMessage = "Didascalia e hashtag copiati: incollali in Instagram."
+                    }
                 }
             }
         }

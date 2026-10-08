@@ -30,6 +30,7 @@ struct SceneAnalysis {
         var better: String = ""
         var format: String = ""
         var hashtags: [String] = []
+        var caption: String = ""
     }
 
     var scene: String = ""
@@ -104,7 +105,8 @@ struct SceneAnalysis {
                 why: (s["why"] as? [String] ?? []).prefix(3).map { $0 },
                 better: s["better"] as? String ?? "",
                 format: s["format"] as? String ?? "",
-                hashtags: (s["hashtags"] as? [String] ?? []).prefix(6).map { $0 })
+                hashtags: (s["hashtags"] as? [String] ?? []).prefix(6).map { $0 },
+                caption: s["caption"] as? String ?? "")
         }
         a.tips = (o["tips"] as? [String] ?? []).prefix(3).map { $0 }
         return a
@@ -134,12 +136,12 @@ enum Prompts {
     private static func socialRule(_ audience: String) -> String {
         let who = audience.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
-        - "social": valuta con franchezza quanto la foto può funzionare su Instagram, confrontandola con ciò che di solito ottiene buon coinvolgimento nello stesso genere: originalità del soggetto, impatto visivo nel primo istante, pulizia della composizione, qualità della luce, emozione o storia. Se il soggetto è banale o poco interessante dillo chiaramente e in "better" suggerisci cosa fotografare invece (o come cambiare approccio). "format" è il formato consigliato (es. "4:5 post", "9:16 storia", "1:1"). "hashtags" pertinenti, senza spazi.\(who.isEmpty ? "" : "\n  Il profilo social dell'utente è: \(who). Valuta l'interesse per questo pubblico.")
+        - "social": valuta con franchezza quanto la foto può funzionare su Instagram, confrontandola con ciò che di solito ottiene buon coinvolgimento nello stesso genere: originalità del soggetto, impatto visivo nel primo istante, pulizia della composizione, qualità della luce, emozione o storia. Se il soggetto è banale o poco interessante dillo chiaramente e in "better" suggerisci cosa fotografare invece (o come cambiare approccio). "format" è il formato consigliato (es. "4:5 post", "9:16 storia", "1:1"). "hashtags" pertinenti, senza spazi. "caption" è una didascalia breve e naturale (1-2 frasi, al massimo un'emoji), senza hashtag, nella lingua e nel tono adatti al pubblico.\(who.isEmpty ? "" : "\n  Il profilo social dell'utente è: \(who). Valuta l'interesse per questo pubblico.")
         """
     }
 
     private static let socialSchema = """
-    "social": {"score":0-100, "verdict":"giudizio in una frase", "why":["max 3 motivi concreti"], "better":"cosa fotografare o cambiare, oppure stringa vuota", "format":"4:5 post", "hashtags":["max 5"]}
+    "social": {"score":0-100, "verdict":"giudizio in una frase", "why":["max 3 motivi concreti"], "better":"cosa fotografare o cambiare, oppure stringa vuota", "format":"4:5 post", "hashtags":["max 5"], "caption":"didascalia pronta da pubblicare"}
     """
 
     private static func fmt(_ v: Double) -> String {
