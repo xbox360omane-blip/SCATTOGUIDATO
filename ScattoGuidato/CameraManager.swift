@@ -7,12 +7,19 @@ enum CameraError: LocalizedError {
     var errorDescription: String? { "Scatto non riuscito. Riprova." }
 }
 
-/// Gestisce la fotocamera posteriore: anteprima, fotogrammi per l'analisi, scatto e impostazioni di esposizione.
+/// Gestisce la fotocamera posteriore: anteprima, obiettivi e zoom, fotogrammi per l'analisi,
+/// scatto e impostazioni di esposizione.
 final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
     @Published var statusText: String?
     @Published var appliedSummary: String?
+    /// Zoom come lo mostra la Fotocamera di iPhone (0,5x, 1x, 2x, 3x…).
+    @Published var zoomDisplay: Double = 1
+    /// Obiettivi disponibili su questo iPhone, in valori "mostrati".
+    @Published var lenses: [Double] = [1]
+
+    weak var previewLayer: AVCaptureVideoPreviewLayer?
 
     /// Chiamato sulla coda video per ogni fotogramma (usato dall'allineamento dal vivo).
     var onFrame: (@Sendable (CVPixelBuffer) -> Void)?
@@ -22,6 +29,8 @@ final class CameraManager: NSObject, ObservableObject {
     private let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private var device: AVCaptureDevice?
+    /// Fattore di zoom del dispositivo che corrisponde a "1x" (2 se c'è l'ultra grandangolo).
+    private var displayBase: CGFloat = 1
     private let ciContext = CIContext()
     private let bufferLock = NSLock()
     private var latestBuffer: CVPixelBuffer?
@@ -60,7 +69,10 @@ final class CameraManager: NSObject, ObservableObject {
     private func configure() {
         session.beginConfiguration()
         session.sessionPreset = .photo
-        guard let dev = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+
+        // Fotocamera "virtuale" che passa da sola tra ultra grandangolo, grandangolo e tele.
+        let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+        guard let dev = types.lazy.compactMap({ AVCaptureDevice.default($0, for: .video, position: .back) }).first,
               let input = try? AVCaptureDeviceInput(device: dev),
               session.canAddInput(input) else {
             session.commitConfiguration()
@@ -85,6 +97,82 @@ final class CameraManager: NSObject, ObservableObject {
             if conn.isVideoRotationAngleSupported(90) { conn.videoRotationAngle = 90 }
         }
         session.commitConfiguration()
+
+        // Obiettivi disponibili
+        let switchOvers = dev.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat($0.doubleValue) }
+        let hasUltraWide = dev.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+        displayBase = hasUltraWide ? (switchOvers.first ?? 2) : 1
+
+        var list: [Double] = []
+        if hasUltraWide { list.append(Double(1 / displayBase)) }
+        list.append(1)
+        let teles = switchOvers.map { Double($0 / displayBase) }.filter { $0 > 1.05 }
+        let maxDisplay = Double(dev.maxAvailableVideoZoomFactor / displayBase)
+        if maxDisplay >= 2, !teles.contains(where: { abs($0 - 2) < 0.15 }) { list.append(2) }
+        list.append(contentsOf: teles)
+        let lensList = Array(Set(list.map { ($0 * 10).rounded() / 10 })).sorted()
+
+        // parte da 1x
+        do {
+            try dev.lockForConfiguration()
+            dev.videoZoomFactor = max(dev.minAvailableVideoZoomFactor, min(displayBase, dev.maxAvailableVideoZoomFactor))
+            dev.unlockForConfiguration()
+        } catch {}
+
+        DispatchQueue.main.async {
+            self.lenses = lensList
+            self.zoomDisplay = 1
+        }
+    }
+
+    // MARK: Zoom
+
+    /// Imposta lo zoom in valori "mostrati" (0,5 = ultra grandangolo, 1 = principale, 3 = tele…).
+    func setZoom(display: Double, ramp: Bool = true) {
+        sessionQueue.async {
+            guard let dev = self.device else { return }
+            let maxZ = min(dev.maxAvailableVideoZoomFactor, self.displayBase * 15)
+            let z = min(max(CGFloat(display) * self.displayBase, dev.minAvailableVideoZoomFactor), maxZ)
+            do {
+                try dev.lockForConfiguration()
+                if ramp {
+                    dev.ramp(toVideoZoomFactor: z, withRate: 8)
+                } else {
+                    dev.cancelVideoZoomRamp()
+                    dev.videoZoomFactor = z
+                }
+                dev.unlockForConfiguration()
+            } catch {}
+            let shown = Double(z / self.displayBase)
+            DispatchQueue.main.async { self.zoomDisplay = shown }
+        }
+    }
+
+    /// Converte un punto dello schermo (coordinate dell'anteprima) nel punto del sensore.
+    func devicePoint(fromLayerPoint p: CGPoint) -> CGPoint? {
+        guard let layer = previewLayer else { return nil }
+        let d = layer.captureDevicePointConverted(fromLayerPoint: p)
+        guard d.x.isFinite, d.y.isFinite else { return nil }
+        return CGPoint(x: min(max(d.x, 0), 1), y: min(max(d.y, 0), 1))
+    }
+
+    /// Tocca per mettere a fuoco ed esporre in un punto.
+    func focus(atDevicePoint dp: CGPoint) {
+        sessionQueue.async {
+            guard let dev = self.device else { return }
+            do {
+                try dev.lockForConfiguration()
+                defer { dev.unlockForConfiguration() }
+                if dev.isFocusPointOfInterestSupported, dev.isFocusModeSupported(.autoFocus) {
+                    dev.focusPointOfInterest = dp
+                    dev.focusMode = .autoFocus
+                }
+                if dev.isExposurePointOfInterestSupported, dev.isExposureModeSupported(.autoExpose) {
+                    dev.exposurePointOfInterest = dp
+                    dev.exposureMode = .autoExpose
+                }
+            } catch {}
+        }
     }
 
     // MARK: Fotogrammi
@@ -119,7 +207,8 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: Esposizione
 
     /// Applica i valori consigliati dall'AI alla fotocamera.
-    func apply(_ e: SceneAnalysis.Exposure) {
+    /// `devicePoint` è il punto di fuoco già convertito in coordinate del sensore.
+    func apply(_ e: SceneAnalysis.Exposure, devicePoint: CGPoint?) {
         sessionQueue.async {
             guard let dev = self.device else { return }
             var applied: [String] = []
@@ -127,9 +216,7 @@ final class CameraManager: NSObject, ObservableObject {
                 try dev.lockForConfiguration()
                 defer { dev.unlockForConfiguration() }
 
-                if let p = e.focusPoint {
-                    // punto nell'immagine verticale -> coordinate del sensore (orizzontale)
-                    let dp = CGPoint(x: p.y, y: 1 - p.x)
+                if let dp = devicePoint {
                     if dev.isFocusPointOfInterestSupported, dev.isFocusModeSupported(.continuousAutoFocus) {
                         dev.focusPointOfInterest = dp
                         dev.focusMode = .continuousAutoFocus
@@ -166,7 +253,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    /// Torna all'automatico.
+    /// Torna all'automatico (fuoco, esposizione, bianco).
     func resetToAuto() {
         sessionQueue.async {
             guard let dev = self.device else { return }

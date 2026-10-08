@@ -106,17 +106,8 @@ enum LocalAnalyzer {
         if backlit {
             moves.append(.init(icon: "↻", text: "Gira attorno al soggetto finché la luce non arriva di lato o alle tue spalle."))
         }
-        if abs(a.rotate) > 0 {
-            moves.append(.init(icon: "↻", text: String(format: "L'orizzonte è storto di %.0f°: raddrizza il telefono.", abs(a.rotate))))
-        }
-        let offX = (cx - W / 2) / W, offY = (cy - H / 2) / H
-        if offX > 0.06 { moves.append(.init(icon: "→", text: "Sposta l'inquadratura un po' a destra.")) }
-        if offX < -0.06 { moves.append(.init(icon: "←", text: "Sposta l'inquadratura un po' a sinistra.")) }
-        if offY > 0.06 { moves.append(.init(icon: "↓", text: "Inclina leggermente verso il basso.")) }
-        if offY < -0.06 { moves.append(.init(icon: "↑", text: "Inclina leggermente verso l'alto.")) }
-        if cropH / H < 0.8 { moves.append(.init(icon: "⤢", text: "Avvicinati al soggetto finché il mirino coincide con la sagoma.")) }
         if isPortrait && Double(subject.minY) < 0.05 {
-            moves.append(.init(icon: "⤡", text: "Allontanati un poco: la testa è troppo vicina al bordo."))
+            moves.append(.init(icon: "⌄", text: "Fai un passo indietro e rianalizza: la testa è troppo vicina al bordo."))
         }
         a.moves = Array(moves.prefix(4))
 

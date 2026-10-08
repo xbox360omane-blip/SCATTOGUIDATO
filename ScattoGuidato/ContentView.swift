@@ -1,15 +1,22 @@
 import SwiftUI
 import Photos
 
-private let amber = Color(red: 0.95, green: 0.70, blue: 0.24)
-private let good = Color(red: 0.50, green: 0.81, blue: 0.54)
-private let warn = Color(red: 0.91, green: 0.53, blue: 0.36)
+let amber = Color(red: 0.95, green: 0.70, blue: 0.24)
+let good = Color(red: 0.50, green: 0.81, blue: 0.54)
+let warn = Color(red: 0.91, green: 0.53, blue: 0.36)
+
+enum ShootMode: String {
+    case guided, free
+}
 
 struct Review: Identifiable {
     let id = UUID()
     let original: UIImage
     let develop: SceneAnalysis.Develop?
+    let social: SceneAnalysis.Social?
 }
+
+typealias PhotoEvaluator = (UIImage) async throws -> SceneAnalysis
 
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
@@ -17,12 +24,14 @@ struct ContentView: View {
     @StateObject private var motion = MotionLevel()
     @AppStorage("claudeModel") private var model = "claude-sonnet-5-5"
     @AppStorage("useAI") private var useAI = true
+    @AppStorage("socialProfile") private var socialProfile = ""
+    @AppStorage("shootMode") private var modeRaw = ShootMode.guided.rawValue
 
     @State private var apiKey = Keychain.load() ?? ""
     @State private var analysis: SceneAnalysis?
-    @State private var target: UIImage?          // inquadratura obiettivo grezza (per l'allineamento)
+    @State private var target: UIImage?          // inquadratura obiettivo (per l'allineamento)
     @State private var targetPreview: UIImage?   // obiettivo sviluppato (la sagoma che vedi)
-    @State private var ghostOpacity = 0.3
+    @State private var ghostOpacity = 0.35
     @State private var busy = false
     @State private var busyText = ""
     @State private var errorText: String?
@@ -30,6 +39,12 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var panelOpen = false
     @State private var viewAspect: CGFloat = 9.0 / 19.5
+    @State private var screenSize: CGSize = .zero
+    @State private var zoomBeforeGuide: Double?
+    @State private var pinchStart: Double?
+    @State private var focusMark: CGPoint?
+
+    private var mode: ShootMode { ShootMode(rawValue: modeRaw) ?? .guided }
 
     /// L'AI si usa solo se attivata e con una chiave inserita; altrimenti analisi locale.
     private var aiActive: Bool { useAI && !apiKey.isEmpty }
@@ -39,23 +54,54 @@ struct ContentView: View {
         return t.size.width / t.size.height
     }
 
+    private var evaluator: PhotoEvaluator? {
+        guard aiActive else { return nil }
+        let client = ClaudeClient(apiKey: apiKey, model: model)
+        let prompt = Prompts.evaluate(audience: socialProfile)
+        return { img in try await client.analyze(image: img, prompt: prompt) }
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 // Mirino a tutto schermo e sovrapposizioni nelle stesse coordinate
                 ZStack {
-                    CameraPreview(session: camera.session)
-                    overlay(size: geo.size)
+                    CameraPreview(camera: camera, fill: mode == .guided)
+                    overlay
+                    if let p = focusMark {
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(amber, lineWidth: 1.5)
+                            .frame(width: 70, height: 70)
+                            .position(p)
+                            .allowsHitTesting(false)
+                    }
                 }
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { v in
+                            if pinchStart == nil {
+                                pinchStart = camera.zoomDisplay
+                                if target != nil { resetGuide(restoreZoom: false) }
+                            }
+                            camera.setZoom(display: (pinchStart ?? 1) * Double(v), ramp: false)
+                        }
+                        .onEnded { _ in pinchStart = nil }
+                )
+                .simultaneousGesture(
+                    SpatialTapGesture().onEnded { v in focusTap(at: v.location) }
+                )
 
                 // Comandi, rispettando le aree sicure
                 VStack(spacing: 10) {
                     topBar
                     Spacer()
-                    liveHint
+                    if mode == .guided { liveHint }
                     level
-                    adviceCard
+                    if mode == .guided { adviceCard }
+                    lensBar
+                    modePicker
                     controls
                 }
                 .padding(.horizontal, 14)
@@ -81,7 +127,6 @@ struct ContentView: View {
         .background(Color.black)
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
-        .statusBarHidden(false)
         .onAppear {
             let t = tracker
             camera.onFrame = { [weak t] buf in t?.process(buf) }
@@ -95,11 +140,12 @@ struct ContentView: View {
         .onChange(of: tracker.aligned) { _, aligned in
             if aligned { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         }
+        .onChange(of: modeRaw) { _, _ in resetGuide(restoreZoom: true) }
         .sheet(isPresented: $showSettings) {
             SettingsView(apiKey: $apiKey, model: $model, useAI: $useAI)
         }
         .fullScreenCover(item: $review) { r in
-            ReviewView(review: r) { review = nil }
+            ReviewView(review: r, evaluate: evaluator) { review = nil }
         }
     }
 
@@ -108,26 +154,26 @@ struct ContentView: View {
         let w = geo.size.width + geo.safeAreaInsets.leading + geo.safeAreaInsets.trailing
         let h = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
         guard w > 0, h > 0 else { return }
+        screenSize = CGSize(width: w, height: h)
         viewAspect = w / h
         tracker.viewAspect = viewAspect
     }
 
     // MARK: Sovrapposizioni sul mirino
 
-    private func overlay(size: CGSize) -> some View {
+    private var overlay: some View {
         GeometryReader { g in
             let full = CGRect(origin: .zero, size: g.size)
-            let r = fitRect(aspect: targetAspect, in: g.size)
+            // modalità libera: la foto intera 3:4; guidata: il riquadro dell'obiettivo
+            let r = fitRect(aspect: mode == .free ? 3.0 / 4.0 : targetAspect, in: g.size)
             ZStack {
-                if target != nil {
+                if mode == .guided && target != nil {
                     Path { p in p.addRect(full); p.addRect(r) }
                         .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
                     if let ghost = targetPreview {
                         Image(uiImage: ghost)
                             .resizable()
-                            .scaledToFill()
                             .frame(width: r.width, height: r.height)
-                            .clipped()
                             .opacity(ghostOpacity)
                             .position(x: r.midX, y: r.midY)
                     }
@@ -149,13 +195,16 @@ struct ContentView: View {
 
     private var topBar: some View {
         HStack(spacing: 8) {
-            if let a = analysis, !a.scene.isEmpty {
+            if mode == .guided, let a = analysis, !a.scene.isEmpty {
                 chip(a.scene)
             } else {
                 chip(aiActive ? "AI" : "LOCALE")
             }
+            if mode == .guided, let s = analysis?.social {
+                chip("Social \(Int(s.score))", color: scoreColor(s.score))
+            }
             Spacer()
-            if target != nil {
+            if mode == .guided && target != nil {
                 chip("Match \(Int(tracker.similarity * 100))%", color: tracker.similarity > 0.75 ? good : amber)
             }
         }
@@ -228,11 +277,14 @@ struct ContentView: View {
         } else if let a = analysis {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 10) {
-                    if let first = a.moves.first {
-                        moveIcon(first.icon)
-                        Text(first.text).font(.subheadline).lineLimit(panelOpen ? nil : 2)
+                    if !a.moves.isEmpty {
+                        moveIcon("!")
+                        Text("Per una foto migliore spostati: \(a.moves[0].text)")
+                            .font(.subheadline).lineLimit(panelOpen ? nil : 2)
                     } else {
-                        Text(a.light).font(.subheadline).lineLimit(2)
+                        moveIcon("✓")
+                        Text("Da qui va bene: segui le frecce e allinea la sagoma.")
+                            .font(.subheadline).lineLimit(2)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: panelOpen ? "chevron.down" : "chevron.up")
@@ -240,28 +292,55 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 if panelOpen {
-                    if !a.light.isEmpty {
-                        Text(a.light).font(.footnote).foregroundStyle(.secondary)
-                    }
-                    ForEach(a.moves.dropFirst()) { m in
-                        HStack(alignment: .top, spacing: 10) {
-                            moveIcon(m.icon)
-                            Text(m.text).font(.subheadline)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if !a.light.isEmpty {
+                                Text(a.light).font(.footnote).foregroundStyle(.secondary)
+                            }
+                            ForEach(a.moves.dropFirst()) { m in
+                                HStack(alignment: .top, spacing: 10) {
+                                    moveIcon(m.icon)
+                                    Text(m.text).font(.subheadline)
+                                }
+                            }
+                            if !a.moves.isEmpty {
+                                Text("Dopo esserti spostato tocca ↺ e rianalizza.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let l = a.lens, camera.lenses.contains(where: { abs($0 - l) < 0.15 }),
+                               abs(l - camera.zoomDisplay) > 0.15 {
+                                Button {
+                                    resetGuide(restoreZoom: false)
+                                    camera.setZoom(display: l)
+                                } label: {
+                                    Label("Consigliato l'obiettivo \(lensText(l)): passa e rianalizza", systemImage: "camera.aperture")
+                                        .font(.footnote.bold())
+                                }
+                                .tint(amber)
+                            }
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) { ForEach(exposureCells(a.exposure), id: \.0) { c in exifCell(c.0, c.1) } }
+                            }
+                            if let s = camera.appliedSummary {
+                                Label(s, systemImage: "checkmark").font(.caption).foregroundStyle(good)
+                            }
+                            HStack {
+                                Text("Sagoma").font(.caption).foregroundStyle(.secondary)
+                                Slider(value: $ghostOpacity, in: 0...0.8).tint(amber)
+                            }
+                            if let s = a.social {
+                                Divider().overlay(Color.white.opacity(0.2))
+                                SocialSection(social: s)
+                            } else if !aiActive {
+                                Text("La valutazione per i social è disponibile con l'AI attiva.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            ForEach(a.tips, id: \.self) { t in
+                                Text("• " + t).font(.footnote).foregroundStyle(.secondary)
+                            }
                         }
                     }
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) { ForEach(exposureCells(a.exposure), id: \.0) { c in exifCell(c.0, c.1) } }
-                    }
-                    if let s = camera.appliedSummary {
-                        Label(s, systemImage: "checkmark").font(.caption).foregroundStyle(good)
-                    }
-                    HStack {
-                        Text("Sagoma").font(.caption).foregroundStyle(.secondary)
-                        Slider(value: $ghostOpacity, in: 0...0.8).tint(amber)
-                    }
-                    ForEach(a.tips, id: \.self) { t in
-                        Text("• " + t).font(.footnote).foregroundStyle(.secondary)
-                    }
+                    .frame(maxHeight: 300)
                 }
             }
             .padding(12)
@@ -270,6 +349,40 @@ struct ContentView: View {
             .contentShape(Rectangle())
             .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { panelOpen.toggle() } }
         }
+    }
+
+    // MARK: Obiettivi e modalità
+
+    private var lensBar: some View {
+        let active = activeLens()
+        return HStack(spacing: 8) {
+            ForEach(camera.lenses, id: \.self) { l in
+                let isActive = abs(l - active) < 0.01
+                Button { selectLens(l) } label: {
+                    Text(isActive ? zoomText(camera.zoomDisplay) : lensText(l, short: true))
+                        .font(.system(size: isActive ? 13 : 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(isActive ? amber : .white)
+                        .frame(width: isActive ? 42 : 34, height: isActive ? 42 : 34)
+                        .background(Color.black.opacity(0.5), in: Circle())
+                }
+            }
+        }
+        .padding(4)
+        .background(Color.black.opacity(0.25), in: Capsule())
+    }
+
+    private var modePicker: some View {
+        HStack(spacing: 22) {
+            ForEach([ShootMode.guided, ShootMode.free], id: \.self) { m in
+                Button { modeRaw = m.rawValue } label: {
+                    Text(m == .guided ? "GUIDATA" : "LIBERA")
+                        .font(.caption.bold())
+                        .tracking(1.2)
+                        .foregroundStyle(mode == m ? amber : Color.white.opacity(0.75))
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     // MARK: Comandi
@@ -283,10 +396,10 @@ struct ContentView: View {
                     .background(Color.black.opacity(0.4), in: Circle())
             }
             Spacer()
-            Button(action: target == nil ? runAnalysis : shoot) {
+            Button(action: shutterAction) {
                 ZStack {
                     Circle().stroke(Color.white, lineWidth: 4).frame(width: 78, height: 78)
-                    if target == nil {
+                    if mode == .guided && target == nil {
                         Circle().fill(amber).frame(width: 64, height: 64)
                         VStack(spacing: 0) {
                             Image(systemName: "sparkles").font(.title3)
@@ -294,22 +407,30 @@ struct ContentView: View {
                         }
                         .foregroundStyle(.black)
                     } else {
-                        Circle().fill(tracker.aligned ? good : Color.white).frame(width: 64, height: 64)
+                        Circle().fill(mode == .guided && tracker.aligned ? good : Color.white).frame(width: 64, height: 64)
                     }
                 }
             }
             .disabled(busy)
             Spacer()
-            Button(action: resetGuide) {
+            Button { resetGuide(restoreZoom: true) } label: {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.title3)
                     .frame(width: 48, height: 48)
                     .background(Color.black.opacity(0.4), in: Circle())
             }
-            .disabled(target == nil || busy)
-            .opacity(target == nil ? 0.35 : 1)
+            .disabled(mode == .free || target == nil || busy)
+            .opacity(mode == .free || target == nil ? 0.3 : 1)
         }
         .padding(.top, 2)
+    }
+
+    private func shutterAction() {
+        switch mode {
+        case .free: shootFree()
+        case .guided:
+            if target == nil { runAnalysis() } else { shootGuided() }
+        }
     }
 
     // MARK: Azioni
@@ -322,15 +443,17 @@ struct ContentView: View {
         }
         // l'analisi vede esattamente ciò che vedi sullo schermo
         let frame = ImageTools.centerCrop(raw, aspect: viewAspect)
+        let zoomNow = camera.zoomDisplay
+        let prompt = Prompts.analyze(zoom: zoomNow, lenses: camera.lenses, audience: socialProfile)
         errorText = nil
-        busyText = aiActive ? "L'AI analizza scena e luce…" : "Analizzo scena e luce…"
+        busyText = aiActive ? "L'AI analizza scena, luce e interesse social…" : "Analizzo scena e luce…"
         busy = true
         let client: ClaudeClient? = aiActive ? ClaudeClient(apiKey: apiKey, model: model) : nil
         Task {
             do {
                 let a: SceneAnalysis
                 if let client {
-                    a = try await client.analyze(image: frame)
+                    a = try await client.analyze(image: frame, prompt: prompt)
                 } else {
                     a = await Task.detached(priority: .userInitiated) { LocalAnalyzer.analyze(frame) }.value
                 }
@@ -342,7 +465,8 @@ struct ContentView: View {
                     targetPreview = preview
                     panelOpen = false
                     tracker.setTarget(ideal)
-                    camera.apply(a.exposure)
+                    zoomBeforeGuide = zoomNow
+                    applyGuide(frame: frame, ideal: ideal, analysis: a, zoomNow: zoomNow)
                     busy = false
                 }
             } catch {
@@ -354,7 +478,32 @@ struct ContentView: View {
         }
     }
 
-    private func shoot() {
+    /// Zoom automatico: il riquadro ideale riempie la cornice sullo schermo senza cambiare punto di vista,
+    /// quindi la sagoma è replicabile solo puntando e raddrizzando il telefono.
+    private func applyGuide(frame: UIImage, ideal: UIImage, analysis a: SceneAnalysis, zoomNow: Double) {
+        let S = screenSize
+        guard S.width > 0, frame.size.width > 0, ideal.size.height > 0 else {
+            camera.apply(a.exposure, devicePoint: nil)
+            return
+        }
+        let R = fitRect(aspect: ideal.size.width / ideal.size.height, in: S)
+        let effW = ideal.size.width / frame.size.width
+        let effH = ideal.size.height / frame.size.height
+        let z = Double((R.width / S.width) / max(effW, 0.05))
+        camera.setZoom(display: zoomNow * z)
+
+        var dp: CGPoint?
+        if let p = a.exposure.focusPoint {
+            let c = a.safeCrop
+            let cx = c.x + c.w / 2, cy = c.y + c.h / 2
+            let sp = CGPoint(x: R.midX + CGFloat(p.x - cx) / effW * R.width,
+                             y: R.midY + CGFloat(p.y - cy) / effH * R.height)
+            if R.contains(sp) { dp = camera.devicePoint(fromLayerPoint: sp) }
+        }
+        camera.apply(a.exposure, devicePoint: dp)
+    }
+
+    private func shootGuided() {
         guard !busy else { return }
         busyText = "Scatto…"
         busy = true
@@ -364,11 +513,11 @@ struct ContentView: View {
         Task {
             do {
                 let photo = try await camera.capturePhoto(flash: a?.exposure.flash == true)
-                // stessa porzione che vedi nel riquadro sul mirino
+                // stessa porzione che vedi nella cornice sul mirino
                 let visible = ImageTools.centerCrop(photo, aspect: va)
                 let cropped = ImageTools.centerCrop(visible, aspect: aspect)
                 await MainActor.run {
-                    review = Review(original: cropped, develop: a?.develop)
+                    review = Review(original: cropped, develop: a?.develop, social: a?.social)
                     busy = false
                 }
             } catch {
@@ -380,7 +529,29 @@ struct ContentView: View {
         }
     }
 
-    private func resetGuide() {
+    private func shootFree() {
+        guard !busy else { return }
+        busyText = "Scatto…"
+        busy = true
+        Task {
+            do {
+                let photo = try await camera.capturePhoto(flash: false)
+                await MainActor.run {
+                    review = Review(original: photo.normalizedUp(), develop: nil, social: nil)
+                    busy = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorText = error.localizedDescription
+                    busy = false
+                }
+            }
+        }
+    }
+
+    private func resetGuide(restoreZoom: Bool) {
+        if restoreZoom, let z = zoomBeforeGuide, target != nil { camera.setZoom(display: z) }
+        zoomBeforeGuide = nil
         analysis = nil
         target = nil
         targetPreview = nil
@@ -390,7 +561,25 @@ struct ContentView: View {
         camera.resetToAuto()
     }
 
+    private func selectLens(_ l: Double) {
+        if target != nil { resetGuide(restoreZoom: false) }
+        camera.setZoom(display: l)
+    }
+
+    private func focusTap(at p: CGPoint) {
+        guard let dp = camera.devicePoint(fromLayerPoint: p) else { return }
+        camera.focus(atDevicePoint: dp)
+        focusMark = p
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if focusMark == p { focusMark = nil }
+        }
+    }
+
     // MARK: Aiuti grafici
+
+    private func activeLens() -> Double {
+        camera.lenses.last(where: { $0 <= camera.zoomDisplay + 0.05 }) ?? (camera.lenses.first ?? 1)
+    }
 
     private func fitRect(aspect: CGFloat, in size: CGSize) -> CGRect {
         let W = size.width, H = size.height
@@ -398,6 +587,20 @@ struct ContentView: View {
         if h > H { h = H; w = H * aspect }
         return CGRect(x: (W - w) / 2, y: (H - h) / 2, width: w, height: h)
     }
+
+    private func numberText(_ v: Double) -> String {
+        let r = (v * 10).rounded() / 10
+        return r == r.rounded() ? "\(Int(r))" : String(format: "%.1f", r).replacingOccurrences(of: ".", with: ",")
+    }
+
+    private func zoomText(_ v: Double) -> String { numberText(v) + "×" }
+
+    private func lensText(_ v: Double, short: Bool = false) -> String {
+        if short && v < 1 { return "," + numberText(v * 10) }
+        return numberText(v) + "×"
+    }
+
+    private func scoreColor(_ s: Double) -> Color { s >= 65 ? good : (s >= 40 ? amber : warn) }
 
     private func moveIcon(_ s: String) -> some View {
         Text(s)
@@ -453,10 +656,52 @@ struct ThirdsGrid: Shape {
     }
 }
 
+// MARK: Valutazione social
+
+struct SocialSection: View {
+    let social: SceneAnalysis.Social
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("INTERESSE SOCIAL").font(.caption2.monospaced()).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(Int(social.score))/100")
+                    .font(.caption.monospaced().bold())
+                    .foregroundStyle(social.score >= 65 ? good : (social.score >= 40 ? amber : warn))
+            }
+            if !social.verdict.isEmpty {
+                Text(social.verdict).font(.subheadline)
+            }
+            ForEach(social.why, id: \.self) { w in
+                Text("• " + w).font(.footnote).foregroundStyle(.secondary)
+            }
+            if !social.better.isEmpty {
+                Label(social.better, systemImage: "lightbulb")
+                    .font(.footnote)
+                    .foregroundStyle(amber)
+            }
+            if !social.format.isEmpty {
+                Text("Formato consigliato: " + social.format).font(.caption).foregroundStyle(.secondary)
+            }
+            if !social.hashtags.isEmpty {
+                Text(social.hashtags.map { $0.hasPrefix("#") ? $0 : "#" + $0 }.joined(separator: " "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Text("Stima basata su ciò che di solito funziona sui social, non su dati in tempo reale.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
 // MARK: Revisione con intensità regolabile
 
 struct ReviewView: View {
     let review: Review
+    let evaluate: PhotoEvaluator?
     let onClose: () -> Void
 
     @AppStorage("developStrength") private var strength = ImageTools.defaultStrength
@@ -465,6 +710,10 @@ struct ReviewView: View {
     @State private var saveMessage: String?
     @State private var saved = false
     @State private var working = false
+    @State private var develop: SceneAnalysis.Develop?
+    @State private var social: SceneAnalysis.Social?
+    @State private var tips: [String] = []
+    @State private var evaluating = false
 
     var body: some View {
         ZStack {
@@ -482,7 +731,20 @@ struct ReviewView: View {
             VStack(spacing: 10) {
                 Spacer()
                 VStack(spacing: 10) {
-                    if review.develop != nil {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if let s = social {
+                                SocialSection(social: s)
+                            }
+                            ForEach(tips, id: \.self) { t in
+                                Text("• " + t).font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: social == nil && tips.isEmpty ? 0 : 230)
+
+                    if develop != nil {
                         HStack(spacing: 10) {
                             Text("Correzioni").font(.caption).foregroundStyle(.secondary)
                             Slider(value: $strength, in: 0...1, onEditingChanged: { editing in
@@ -496,6 +758,19 @@ struct ReviewView: View {
                         Text("Tieni premuta la foto per vedere l'originale")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    }
+                    if evaluate != nil && social == nil {
+                        Button(action: runEvaluation) {
+                            HStack {
+                                if evaluating { ProgressView().tint(.black) }
+                                Text(evaluating ? "Valuto…" : "Valuta foto e interesse social")
+                            }
+                            .frame(maxWidth: .infinity).padding(.vertical, 6)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.white)
+                        .foregroundStyle(.black)
+                        .disabled(evaluating)
                     }
                     if let m = saveMessage {
                         Text(m).font(.footnote).foregroundStyle(saved ? good : .secondary)
@@ -521,11 +796,39 @@ struct ReviewView: View {
             }
         }
         .foregroundStyle(.white)
-        .onAppear { render() }
+        .onAppear {
+            develop = review.develop
+            social = review.social
+            render()
+        }
+    }
+
+    private func runEvaluation() {
+        guard let evaluate, !evaluating else { return }
+        evaluating = true
+        saveMessage = nil
+        let img = review.original
+        Task {
+            do {
+                let a = try await evaluate(img)
+                await MainActor.run {
+                    develop = a.develop
+                    social = a.social
+                    tips = a.tips
+                    evaluating = false
+                    render()
+                }
+            } catch {
+                await MainActor.run {
+                    saveMessage = error.localizedDescription
+                    evaluating = false
+                }
+            }
+        }
     }
 
     private func render() {
-        guard let d = review.develop else { shown = review.original; return }
+        guard let d = develop else { shown = review.original; return }
         working = true
         saved = false
         let s = strength

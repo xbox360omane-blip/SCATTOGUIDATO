@@ -34,6 +34,7 @@ struct SettingsView: View {
     @Binding var model: String
     @Binding var useAI: Bool
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("socialProfile") private var socialProfile = ""
     @State private var draftKey = ""
 
     private let models: [(String, String)] = [
@@ -61,6 +62,14 @@ struct SettingsView: View {
                     Text("Chiave API Anthropic")
                 } footer: {
                     Text("Crea una chiave su console.anthropic.com. Resta salvata nel Portachiavi del telefono.")
+                }
+                Section {
+                    TextField("es. architettura e interni, viaggi, food", text: $socialProfile, axis: .vertical)
+                        .lineLimit(1...3)
+                } header: {
+                    Text("Il tuo profilo social")
+                } footer: {
+                    Text("Facoltativo. Serve all'AI per valutare se una foto può interessare al tuo pubblico.")
                 }
                 Section("Modello") {
                     Picker("Modello", selection: $model) {

@@ -28,17 +28,17 @@ struct ClaudeClient {
     var apiKey: String
     var model: String
 
-    func analyze(image: UIImage) async throws -> SceneAnalysis {
+    func analyze(image: UIImage, prompt: String) async throws -> SceneAnalysis {
         guard !apiKey.isEmpty else { throw ClaudeError.missingKey }
         guard let b64 = image.jpegBase64(maxSide: 1280) else { throw ClaudeError.badResponse }
 
         let content: [[String: Any]] = [
             ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": b64]],
-            ["type": "text", "text": Prompts.analyze]
+            ["type": "text", "text": prompt]
         ]
         let body: [String: Any] = [
             "model": model,
-            "max_tokens": 1500,
+            "max_tokens": 2500,
             "messages": [["role": "user", "content": content]]
         ]
 
