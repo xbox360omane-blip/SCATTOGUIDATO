@@ -182,7 +182,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Scatto Guidato";
 				INFOPLIST_KEY_NSCameraUsageDescription = "La fotocamera serve per inquadrare e scattare le foto guidate dall'AI.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Serve per salvare le foto nel rullino.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Il microfono serve per registrare l'audio dei video.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Serve per salvare foto e video nel rullino.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
@@ -210,7 +211,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Scatto Guidato";
 				INFOPLIST_KEY_NSCameraUsageDescription = "La fotocamera serve per inquadrare e scattare le foto guidate dall'AI.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Serve per salvare le foto nel rullino.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Il microfono serve per registrare l'audio dei video.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Serve per salvare foto e video nel rullino.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
