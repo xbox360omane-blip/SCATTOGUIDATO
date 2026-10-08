@@ -1,0 +1,50 @@
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Scarica il progetto
+        uses: actions/checkout@v4
+
+      - name: Usa l'Xcode 16 più recente
+        run: |
+          XC=$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)
+          echo "Uso $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Mostra i file del progetto
+        run: ls -la
+
+      - name: Compila (senza firma)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ScattoGuidato.xcodeproj \
+            -target ScattoGuidato \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Crea il file IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/ScattoGuidato.app Payload/
+          zip -qry ScattoGuidato.ipa Payload
+          ls -lh ScattoGuidato.ipa
+
+      - name: Rendi scaricabile l'IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScattoGuidato-ipa
+          path: ScattoGuidato.ipa
+          retention-days: 30
